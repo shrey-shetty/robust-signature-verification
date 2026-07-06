@@ -1,0 +1,7 @@
+defaults:
+  - base
+
+name: exp01_siamese_resnet_cedar
+dataset:
+  name: cedar
+  root: data/raw/cedar

@@ -1,0 +1,9 @@
+defaults:
+  - base
+
+name: exp02_siamese_effnet_cedar
+dataset:
+  name: cedar
+  root: data/raw/cedar
+model:
+  backbone: efficientnet

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.ipynb_checkpoints/
+checkpoints/
+experiments/*/
+!experiments/.gitkeep
+*.log
+.env
+.venv/
+data/raw/
+data/processed/
+structure.txt
+.claude/settings.local.json
+.pytest_cache/
