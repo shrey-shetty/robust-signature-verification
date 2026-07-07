@@ -137,8 +137,19 @@ def main() -> int:
         "",
     ]
 
+    gpds_assignment = split_writers(all_writers["gpds_synthetic_4000"], SEED)
+
     for name, writers in all_writers.items():
-        assignment = split_writers(writers, SEED)
+        if name == "institutional":
+            # Institutional shares writer identities with GPDS Synthetic
+            # (confirmed by visual inspection of multiple writer pairs);
+            # reuse the GPDS assignment to prevent writer leakage across
+            # the two datasets in combined-training experiments.
+            assignment = {w: gpds_assignment[w] for w in writers}
+        elif name == "gpds_synthetic_4000":
+            assignment = gpds_assignment
+        else:
+            assignment = split_writers(writers, SEED)
         counts = {"train": 0, "val": 0, "test": 0}
         out = SPLITS_DIR / f"split_{name}.csv"
         with out.open("w", newline="", encoding="utf-8") as fh:
