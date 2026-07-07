@@ -1,0 +1,9 @@
+seed: 42
+ratios: train=0.7, val=0.1, test=0.2
+note: splits are by writer (writer-independent protocol); writer identity from folder ID (BHSig260-Hindi writer 123 filename anomaly documented separately)
+
+gpds_synthetic_4000: 4000 writers -> 2800 train / 400 val / 800 test
+bhsig260_bengali: 100 writers -> 70 train / 10 val / 20 test
+bhsig260_hindi: 160 writers -> 112 train / 16 val / 32 test
+cedar: 55 writers -> 38 train / 6 val / 11 test
+institutional: 4000 writers -> 2800 train / 400 val / 800 test
