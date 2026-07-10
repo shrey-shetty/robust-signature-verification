@@ -1,0 +1,6 @@
+dataset,path,ink_fraction
+bhsig260_bengali,c:\Users\nehas\Downloads\robust-signature-verification\data\raw\BHSig260-Bengali\2\B-S-2-G-06.tif,0.004696969696969697
+gpds_synthetic_4000,c:\Users\nehas\Downloads\robust-signature-verification\data\raw\SignatureGPDSSyntheticOffLine4000\firmasSINTESISmanuscritas\1150\cf-1150-22.jpg,0.0024545454545454545
+gpds_synthetic_4000,c:\Users\nehas\Downloads\robust-signature-verification\data\raw\SignatureGPDSSyntheticOffLine4000\firmasSINTESISmanuscritas\608\c-608-20.jpg,0.0025454545454545456
+gpds_synthetic_4000,c:\Users\nehas\Downloads\robust-signature-verification\data\raw\SignatureGPDSSyntheticOffLine4000\firmasSINTESISmanuscritas\2362\cf-2362-18.jpg,0.0028484848484848484
+gpds_synthetic_4000,c:\Users\nehas\Downloads\robust-signature-verification\data\raw\SignatureGPDSSyntheticOffLine4000\firmasSINTESISmanuscritas\531\c-531-20.jpg,0.004606060606060606
