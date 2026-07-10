@@ -1,0 +1,6 @@
+dataset,n,width_min,width_med,width_max,height_min,height_med,height_max,ar_med,modes
+bhsig260_bengali,5400,898,992.0,1083,233,279.0,305,3.4397,"{'L': np.int64(4292), 'P': np.int64(1108)}"
+bhsig260_hindi,8640,843,979.0,1329,229,283.0,435,3.4645,"{'L': np.int64(4383), 'P': np.int64(4257)}"
+cedar,2640,264,576.0,888,145,342.0,816,1.52345,"{'P': np.int64(1248), 'L': np.int64(1248), 'RGBA': np.int64(144)}"
+gpds_synthetic_4000,216000,263,951.0,2973,216,588.0,1338,1.6381,{'L': np.int64(216000)}
+institutional,112000,220,220.0,220,155,155.0,155,1.4194,{'RGB': np.int64(112000)}

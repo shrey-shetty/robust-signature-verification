@@ -1,0 +1,11 @@
+dataset,label,modal_count,min,max,n_writers
+bhsig260_bengali,forgery,30,30,30,100
+bhsig260_bengali,genuine,24,24,24,100
+bhsig260_hindi,forgery,30,30,30,160
+bhsig260_hindi,genuine,24,24,24,160
+cedar,forgery,24,24,24,55
+cedar,genuine,24,24,24,55
+gpds_synthetic_4000,forgery,30,30,30,4000
+gpds_synthetic_4000,genuine,24,24,24,4000
+institutional,forgery,16,16,16,4000
+institutional,genuine,12,12,12,4000

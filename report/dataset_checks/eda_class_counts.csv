@@ -1,0 +1,6 @@
+dataset,forgery,genuine,total,forgery_ratio
+bhsig260_bengali,3000,2400,5400,0.556
+bhsig260_hindi,4800,3840,8640,0.556
+cedar,1320,1320,2640,0.5
+gpds_synthetic_4000,120000,96000,216000,0.556
+institutional,64000,48000,112000,0.571

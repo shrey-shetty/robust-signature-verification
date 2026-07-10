@@ -6,8 +6,9 @@ for the heterogeneous resolutions across our five datasets:
   1. Convert to grayscale (institutional images are RGB; others are 'L').
   2. Estimate background with Otsu's threshold; set background pixels to
      white, keep foreground (ink) in grayscale.
-  3. Invert intensities so background = 0 and ink is bright. Networks
-     train better when the informative pixels are the nonzero ones.
+  3. Binarize: background = 0, ink = 255. Grayscale ink intensity is
+     deliberately discarded — CEDAR carries a class-conditional
+     brightness artifact that acts as a shortcut feature if preserved.
   4. Tight-crop to the bounding box of the ink.
   5. Pad to the target aspect ratio (centered), then resize to the
      target size (default H=150, W=220, as in Hafemann et al.).
@@ -81,10 +82,17 @@ def preprocess_array(gray: np.ndarray,
     if not ink_mask.any():
         raise ValueError("no ink found after Otsu thresholding (blank image?)")
 
-    # 3. Invert: background -> 0, ink stays grayscale (bright).
-    inverted = 255 - gray.astype(np.int16)
-    inverted[~ink_mask] = 0
-    inverted = inverted.astype(np.uint8)
+    # 3. Binarize: background -> 0, ink -> 255.
+    # Ink is deliberately NOT kept in grayscale: CEDAR scans carry a
+    # class-conditional brightness artifact (genuine vs forged mean ink
+    # intensity differs), which survives grayscale-preserving
+    # preprocessing and is exploitable as a shortcut (intensity-only
+    # EER 0.322, see preproc_cedar_shortcut_eer.csv). Binarization
+    # removes all ink-intensity statistics by construction; stroke
+    # shape is preserved, and the later bilinear resize keeps edges
+    # soft (anti-aliased) rather than hard.
+    inverted = np.zeros_like(gray)
+    inverted[ink_mask] = 255
 
     # 4. Tight crop to ink bounding box.
     rows = np.any(ink_mask, axis=1)

@@ -1,0 +1,11 @@
+dataset,label,mean_intensity,std_intensity,ink_ratio
+bhsig260_bengali,forgery,247.69,42.56,0.0
+bhsig260_bengali,genuine,247.95,41.51,0.0
+bhsig260_hindi,forgery,245.99,47.09,0.0
+bhsig260_hindi,genuine,248.26,40.9,0.0
+cedar,forgery,248.58,20.41,0.03
+cedar,genuine,235.84,19.63,0.03
+gpds_synthetic_4000,forgery,249.73,27.39,0.03
+gpds_synthetic_4000,genuine,249.55,28.85,0.04
+institutional,forgery,243.51,19.98,0.03
+institutional,genuine,244.97,22.24,0.03

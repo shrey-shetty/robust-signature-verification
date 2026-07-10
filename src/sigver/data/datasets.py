@@ -1,18 +1,211 @@
-"""Dataset wrappers for signature verification sources."""
+"""PyTorch datasets for signature verification.
 
+Ties together:
+  - the verified raw-data layouts (per-writer folders / flat org-forg),
+  - the committed writer-independent split CSVs in data/splits/,
+  - the preprocessing pipeline in sigver.data.preprocessing.
+
+Ground-truth rule: writer identity comes from the FOLDER name for
+per-writer layouts (this neutralizes the BHSig260-Hindi writer-123
+filename anomaly), and from the filename for the flat institutional
+layout (its only source of identity).
+
+Main entry points:
+    samples = list_samples("cedar", split="train")
+    ds = SignatureDataset(samples)          # yields (image, writer_id, is_forgery)
+
+`SignatureDataset` supports an optional in-memory cache (uint8) that is
+practical for the small datasets (CEDAR: ~2.6k images ~= 90 MB cached)
+and should be left off for GPDS/institutional scale.
+"""
+
+from __future__ import annotations
+
+import csv
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+from sigver.data.preprocessing import preprocess_image, TARGET_HEIGHT, TARGET_WIDTH
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DATA_RAW = PROJECT_ROOT / "data" / "raw"
+SPLITS_DIR = PROJECT_ROOT / "data" / "splits"
 
 
-class SignatureDataset:
-    """Simple placeholder dataset class for project scaffolding."""
+@dataclass(frozen=True)
+class Sample:
+    path: Path
+    writer_id: int
+    is_forgery: bool  # False = genuine, True = skilled forgery
 
-    def __init__(self, root: str | Path, split: str = "train"):
-        self.root = Path(root)
-        self.split = split
+
+# ---------------------------------------------------------------------------
+# Dataset layout specs (mirrors scripts/inspect_datasets.py, kept in sync
+# manually; both were validated against the actual data).
+# ---------------------------------------------------------------------------
+
+_PER_WRITER = {
+    "cedar": {
+        "root": DATA_RAW / "CEDAR",
+        "genuine": re.compile(r"^original_\d+_\d+\.png$", re.IGNORECASE),
+        "forgery": re.compile(r"^forgeries_\d+_\d+\.png$", re.IGNORECASE),
+    },
+    "bhsig260_bengali": {
+        "root": DATA_RAW / "BHSig260-Bengali",
+        "genuine": re.compile(r"^B-S-\d+-G-\d+\.tif$", re.IGNORECASE),
+        "forgery": re.compile(r"^B-S-\d+-F-\d+\.tif$", re.IGNORECASE),
+    },
+    "bhsig260_hindi": {
+        "root": DATA_RAW / "BHSig260-Hindi",
+        "genuine": re.compile(r"^H-S-\d+-G-\d+\.tif$", re.IGNORECASE),
+        "forgery": re.compile(r"^H-S-\d+-F-\d+\.tif$", re.IGNORECASE),
+    },
+    "gpds_synthetic_4000": {
+        "root": DATA_RAW / "SignatureGPDSSyntheticOffLine4000" / "firmasSINTESISmanuscritas",
+        # order matters: test forgery ('cf-') before genuine ('c-')
+        "genuine": re.compile(r"^c-\d+-\d+\.jpg$", re.IGNORECASE),
+        "forgery": re.compile(r"^cf-\d+-\d+\.jpg$", re.IGNORECASE),
+    },
+}
+
+_FLAT = {
+    "institutional": {
+        "genuine_dir": DATA_RAW / "signature_verification" / "full_org",
+        "forgery_dir": DATA_RAW / "signature_verification" / "full_forg",
+        "genuine": re.compile(r"^original_(?P<writer>\d+)_\d+\.jpg$", re.IGNORECASE),
+        "forgery": re.compile(r"^forgeries_(?P<writer>\d+)_\d+\.jpg$", re.IGNORECASE),
+    },
+}
+
+DATASET_NAMES = sorted(list(_PER_WRITER) + list(_FLAT))
+
+
+def load_split(dataset: str) -> dict[int, str]:
+    """Read data/splits/split_<dataset>.csv -> {writer_id: 'train'|'val'|'test'}."""
+    path = SPLITS_DIR / f"split_{dataset}.csv"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Split file not found: {path} — run scripts/make_splits.py first."
+        )
+    with path.open(newline="", encoding="utf-8") as fh:
+        return {int(r["writer_id"]): r["split"] for r in csv.DictReader(fh)}
+
+
+def _list_per_writer(name: str) -> list[Sample]:
+    spec = _PER_WRITER[name]
+    root: Path = spec["root"]
+    if not root.is_dir():
+        raise FileNotFoundError(f"Dataset root not found: {root}")
+    samples: list[Sample] = []
+    for wdir in root.iterdir():
+        if not (wdir.is_dir() and re.fullmatch(r"\d+", wdir.name)):
+            continue
+        wid = int(wdir.name)  # folder ID is ground truth
+        for f in wdir.iterdir():
+            if not f.is_file():
+                continue
+            if spec["forgery"].match(f.name):
+                samples.append(Sample(f, wid, True))
+            elif spec["genuine"].match(f.name):
+                samples.append(Sample(f, wid, False))
+            # unrecognized files (e.g. GPDS ParamsUser*.mat) are skipped;
+            # inspect_datasets.py is the tool that audits those.
+    return samples
+
+
+def _list_flat(name: str) -> list[Sample]:
+    spec = _FLAT[name]
+    samples: list[Sample] = []
+    for key, is_forgery in (("genuine_dir", False), ("forgery_dir", True)):
+        folder: Path = spec[key]
+        if not folder.is_dir():
+            raise FileNotFoundError(f"Dataset folder not found: {folder}")
+        pattern = spec["forgery" if is_forgery else "genuine"]
+        for f in folder.iterdir():
+            if f.is_file():
+                m = pattern.match(f.name)
+                if m:
+                    samples.append(Sample(f, int(m.group("writer")), is_forgery))
+    return samples
+
+
+def list_samples(dataset: str, split: str | None = None) -> list[Sample]:
+    """Enumerate samples for a dataset, optionally filtered to one split.
+
+    split: 'train', 'val', 'test', or None for all samples.
+    """
+    if dataset in _PER_WRITER:
+        samples = _list_per_writer(dataset)
+    elif dataset in _FLAT:
+        samples = _list_flat(dataset)
+    else:
+        raise ValueError(f"Unknown dataset '{dataset}'. Known: {DATASET_NAMES}")
+
+    if split is not None:
+        if split not in ("train", "val", "test"):
+            raise ValueError(f"split must be train/val/test, got '{split}'")
+        assignment = load_split(dataset)
+        samples = [s for s in samples if assignment.get(s.writer_id) == split]
+
+    # deterministic order (path-sorted) so downstream shuffling is the only
+    # source of randomness
+    return sorted(samples, key=lambda s: str(s.path))
+
+
+class SignatureDataset(Dataset):
+    """Yields (image_tensor, writer_id, is_forgery) triples.
+
+    image_tensor: float32, shape (1, H, W), values in [0, 1]
+    writer_id:    int64 tensor (scalar)
+    is_forgery:   float32 tensor (scalar; 0.0 genuine, 1.0 forgery)
+
+    cache_in_memory: preprocess every image once up front and keep it as
+    uint8 in RAM. Sensible for CEDAR/BHSig scale; do NOT enable for
+    GPDS/institutional (hundreds of thousands of images).
+
+    transform: optional callable applied to the float32 [0, 1] array
+    AFTER cache retrieval (or after on-the-fly preprocessing when caching
+    is off), so the cache itself always stays clean/deterministic and
+    every __getitem__ call gets fresh, independent randomness. By
+    convention this is used for training-only augmentation (e.g.
+    sigver.data.augmentation.MorphAugment); val/test datasets should be
+    constructed with transform=None so evaluation reflects the raw
+    preprocessing pipeline output.
+    """
+
+    def __init__(self, samples: list[Sample],
+                 target_h: int = TARGET_HEIGHT,
+                 target_w: int = TARGET_WIDTH,
+                 cache_in_memory: bool = False,
+                 transform=None):
+        self.samples = samples
+        self.target_h = target_h
+        self.target_w = target_w
+        self.transform = transform
+        self._cache: list[np.ndarray] | None = None
+        if cache_in_memory:
+            self._cache = [
+                (preprocess_image(s.path, target_h, target_w) * 255).astype(np.uint8)
+                for s in samples
+            ]
 
     def __len__(self) -> int:
-        return 0
+        return len(self.samples)
 
-    def __getitem__(self, index: int):
-        raise NotImplementedError
+    def __getitem__(self, idx: int):
+        s = self.samples[idx]
+        if self._cache is not None:
+            arr = self._cache[idx].astype(np.float32) / 255.0
+        else:
+            arr = preprocess_image(s.path, self.target_h, self.target_w)
+        if self.transform is not None:
+            arr = self.transform(arr)
+        image = torch.from_numpy(arr).unsqueeze(0)  # (1, H, W)
+        writer = torch.tensor(s.writer_id, dtype=torch.int64)
+        label = torch.tensor(1.0 if s.is_forgery else 0.0, dtype=torch.float32)
+        return image, writer, label

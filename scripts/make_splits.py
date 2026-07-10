@@ -134,6 +134,10 @@ def main() -> int:
         "note: splits are by writer (writer-independent protocol); "
         "writer identity from folder ID (BHSig260-Hindi writer 123 "
         "filename anomaly documented separately)",
+        "note: institutional split mirrors gpds_synthetic_4000 — the two "
+        "datasets share writer identities (confirmed by visual inspection "
+        "of writers 1-3), so aligned splits prevent writer leakage in "
+        "combined-training experiments",
         "",
     ]
 
