@@ -47,42 +47,53 @@ class Sample:
 # ---------------------------------------------------------------------------
 # Dataset layout specs (mirrors scripts/inspect_datasets.py, kept in sync
 # manually; both were validated against the actual data).
+#
+# Built as functions of `raw_root` (default DATA_RAW) rather than baked-in
+# module-level paths, so callers (e.g. train_baseline.py --raw-root on
+# Kaggle, where data is mounted read-only under /kaggle/input/<dataset>/)
+# can point at a different raw-data location without editing this file.
 # ---------------------------------------------------------------------------
 
-_PER_WRITER = {
-    "cedar": {
-        "root": DATA_RAW / "CEDAR",
-        "genuine": re.compile(r"^original_\d+_\d+\.png$", re.IGNORECASE),
-        "forgery": re.compile(r"^forgeries_\d+_\d+\.png$", re.IGNORECASE),
-    },
-    "bhsig260_bengali": {
-        "root": DATA_RAW / "BHSig260-Bengali",
-        "genuine": re.compile(r"^B-S-\d+-G-\d+\.tif$", re.IGNORECASE),
-        "forgery": re.compile(r"^B-S-\d+-F-\d+\.tif$", re.IGNORECASE),
-    },
-    "bhsig260_hindi": {
-        "root": DATA_RAW / "BHSig260-Hindi",
-        "genuine": re.compile(r"^H-S-\d+-G-\d+\.tif$", re.IGNORECASE),
-        "forgery": re.compile(r"^H-S-\d+-F-\d+\.tif$", re.IGNORECASE),
-    },
-    "gpds_synthetic_4000": {
-        "root": DATA_RAW / "SignatureGPDSSyntheticOffLine4000" / "firmasSINTESISmanuscritas",
-        # order matters: test forgery ('cf-') before genuine ('c-')
-        "genuine": re.compile(r"^c-\d+-\d+\.jpg$", re.IGNORECASE),
-        "forgery": re.compile(r"^cf-\d+-\d+\.jpg$", re.IGNORECASE),
-    },
-}
 
-_FLAT = {
-    "institutional": {
-        "genuine_dir": DATA_RAW / "signature_verification" / "full_org",
-        "forgery_dir": DATA_RAW / "signature_verification" / "full_forg",
-        "genuine": re.compile(r"^original_(?P<writer>\d+)_\d+\.jpg$", re.IGNORECASE),
-        "forgery": re.compile(r"^forgeries_(?P<writer>\d+)_\d+\.jpg$", re.IGNORECASE),
-    },
-}
+def _per_writer_specs(raw_root: Path) -> dict:
+    return {
+        "cedar": {
+            "root": raw_root / "CEDAR",
+            "genuine": re.compile(r"^original_\d+_\d+\.png$", re.IGNORECASE),
+            "forgery": re.compile(r"^forgeries_\d+_\d+\.png$", re.IGNORECASE),
+        },
+        "bhsig260_bengali": {
+            "root": raw_root / "BHSig260-Bengali",
+            "genuine": re.compile(r"^B-S-\d+-G-\d+\.tif$", re.IGNORECASE),
+            "forgery": re.compile(r"^B-S-\d+-F-\d+\.tif$", re.IGNORECASE),
+        },
+        "bhsig260_hindi": {
+            "root": raw_root / "BHSig260-Hindi",
+            "genuine": re.compile(r"^H-S-\d+-G-\d+\.tif$", re.IGNORECASE),
+            "forgery": re.compile(r"^H-S-\d+-F-\d+\.tif$", re.IGNORECASE),
+        },
+        "gpds_synthetic_4000": {
+            "root": raw_root / "SignatureGPDSSyntheticOffLine4000" / "firmasSINTESISmanuscritas",
+            # order matters: test forgery ('cf-') before genuine ('c-')
+            "genuine": re.compile(r"^c-\d+-\d+\.jpg$", re.IGNORECASE),
+            "forgery": re.compile(r"^cf-\d+-\d+\.jpg$", re.IGNORECASE),
+        },
+    }
 
-DATASET_NAMES = sorted(list(_PER_WRITER) + list(_FLAT))
+
+def _flat_specs(raw_root: Path) -> dict:
+    return {
+        "institutional": {
+            "genuine_dir": raw_root / "signature_verification" / "full_org",
+            "forgery_dir": raw_root / "signature_verification" / "full_forg",
+            "genuine": re.compile(r"^original_(?P<writer>\d+)_\d+\.jpg$", re.IGNORECASE),
+            "forgery": re.compile(r"^forgeries_(?P<writer>\d+)_\d+\.jpg$", re.IGNORECASE),
+        },
+    }
+
+
+# Fixed dataset names (independent of raw_root) — used for validation/listing.
+DATASET_NAMES = sorted(list(_per_writer_specs(DATA_RAW)) + list(_flat_specs(DATA_RAW)))
 
 
 def load_split(dataset: str) -> dict[int, str]:
@@ -96,8 +107,8 @@ def load_split(dataset: str) -> dict[int, str]:
         return {int(r["writer_id"]): r["split"] for r in csv.DictReader(fh)}
 
 
-def _list_per_writer(name: str) -> list[Sample]:
-    spec = _PER_WRITER[name]
+def _list_per_writer(name: str, raw_root: Path) -> list[Sample]:
+    spec = _per_writer_specs(raw_root)[name]
     root: Path = spec["root"]
     if not root.is_dir():
         raise FileNotFoundError(f"Dataset root not found: {root}")
@@ -118,8 +129,8 @@ def _list_per_writer(name: str) -> list[Sample]:
     return samples
 
 
-def _list_flat(name: str) -> list[Sample]:
-    spec = _FLAT[name]
+def _list_flat(name: str, raw_root: Path) -> list[Sample]:
+    spec = _flat_specs(raw_root)[name]
     samples: list[Sample] = []
     for key, is_forgery in (("genuine_dir", False), ("forgery_dir", True)):
         folder: Path = spec[key]
@@ -134,15 +145,21 @@ def _list_flat(name: str) -> list[Sample]:
     return samples
 
 
-def list_samples(dataset: str, split: str | None = None) -> list[Sample]:
+def list_samples(dataset: str, split: str | None = None,
+                 raw_root: Path | None = None) -> list[Sample]:
     """Enumerate samples for a dataset, optionally filtered to one split.
 
     split: 'train', 'val', 'test', or None for all samples.
+    raw_root: override for the raw-data root (default: DATA_RAW, i.e.
+        <project_root>/data/raw). Use this to point at a read-only mount
+        such as Kaggle's /kaggle/input/<dataset-name>/ without touching
+        this module.
     """
-    if dataset in _PER_WRITER:
-        samples = _list_per_writer(dataset)
-    elif dataset in _FLAT:
-        samples = _list_flat(dataset)
+    root = raw_root if raw_root is not None else DATA_RAW
+    if dataset in _per_writer_specs(root):
+        samples = _list_per_writer(dataset, root)
+    elif dataset in _flat_specs(root):
+        samples = _list_flat(dataset, root)
     else:
         raise ValueError(f"Unknown dataset '{dataset}'. Known: {DATASET_NAMES}")
 

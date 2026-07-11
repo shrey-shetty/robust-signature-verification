@@ -1,0 +1,28 @@
+# NOT FOR RESULTS -- smoke-test config only.
+#
+# Verifies plumbing (data loading, device selection, path overrides,
+# checkpoint save/resume) end-to-end in a couple of minutes on CPU.
+# 2 epochs is nowhere near enough for a meaningful val EER; do not cite
+# metrics produced from this config in any results analysis.
+#
+# This yaml documents the run's parameters for the record; the config
+# system (src/sigver/utils/config.py) is not wired into train_baseline.py
+# (see recon notes), so actually run it via the equivalent CLI invocation:
+#
+#   .\.venv\Scripts\python.exe scripts\train_baseline.py --dataset cedar ^
+#       --epochs 2 --out experiments\exp01_smoke
+#
+defaults:
+  - base
+
+name: exp01_smoke
+not_for_results: true
+dataset:
+  name: cedar
+  root: data/raw/CEDAR
+model:
+  backbone: smallcnn
+training:
+  batch_size: 32
+  epochs: 2
+  learning_rate: 0.001

@@ -11,7 +11,14 @@ Usage (from project root):
         --checkpoint experiments\\siamese_smallcnn_cedar\\best_model.pt ^
         --threshold 0.3635
 
-Outputs (next to the checkpoint):
+Path/device overrides (defaults reproduce local behavior exactly):
+    --raw-root <dir>   raw-data root (default data/raw under project root;
+                       e.g. /kaggle/input/<dataset-name> on Kaggle)
+    --out / --out-dir <dir>  where to write outputs (default: alongside
+                       the checkpoint, i.e. Path(checkpoint).parent)
+    --device cpu|cuda  override autodetection (default: cuda if available)
+
+Outputs (next to the checkpoint, unless --out-dir overrides it):
     test_metrics.json   EER/AUC/FAR/FRR + run details
     test_scores.csv     per-pair distance, label, kind (for ROC plots later)
 """
@@ -79,19 +86,31 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--cache", action="store_true",
                     help="cache preprocessed images in RAM")
+    ap.add_argument("--raw-root", default=None,
+                    help="override raw-data root (default data/raw under the "
+                         "project root; e.g. /kaggle/input/<dataset-name> on Kaggle)")
+    ap.add_argument("--device", default=None, choices=["cpu", "cuda"],
+                    help="override device autodetection (default: cuda if available)")
+    ap.add_argument("--out", "--out-dir", dest="out", default=None,
+                    help="output dir for test_metrics.json/test_scores.csv "
+                         "(default: alongside the checkpoint)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device) if args.device else (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
     ckpt_path = Path(args.checkpoint)
-    out_dir = ckpt_path.parent
+    out_dir = Path(args.out) if args.out else ckpt_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_root = Path(args.raw_root) if args.raw_root else None
 
     # ---- data ---------------------------------------------------------
     print(f"[data] loading {args.dataset} / {args.split} split ...")
     t0 = time.time()
-    samples = list_samples(args.dataset, args.split)
+    samples = list_samples(args.dataset, args.split, raw_root=raw_root)
     # seed offset 2: distinct from train (seed) and val (seed+1) pair RNG
     pairs = generate_pairs(samples, seed=args.seed + 2)
     print(f"[data] {args.split} pairs: {pair_summary(pairs)}")

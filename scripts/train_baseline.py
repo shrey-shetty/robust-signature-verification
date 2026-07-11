@@ -14,18 +14,34 @@ stays deterministic.
 Usage (from project root):
     .\\.venv\\Scripts\\python.exe scripts\\train_baseline.py --dataset cedar --epochs 10
 
+Path/device overrides (defaults reproduce local behavior exactly):
+    --raw-root <dir>   raw-data root (default data/raw under project root;
+                       e.g. /kaggle/input/<dataset-name> on Kaggle)
+    --out / --out-dir <dir>  output dir (default experiments/siamese_smallcnn_<dataset>)
+    --device cpu|cuda  override autodetection (default: cuda if available)
+    --resume <path>    resume from a last_checkpoint.pt (see below)
+
 Outputs (under --out, default experiments/<name>):
     best_model.pt      state dict of the best-val-EER model
     best_info.json     which epoch the checkpoint is + its val metrics
     history.json       per-epoch train loss, val EER (all and skilled-only),
                        val AUC, best threshold
     config.json        run configuration snapshot (incl. augmentation)
+    last_checkpoint.pt full resumable state (model, optimizer, epoch, best
+                       EER so far, history, RNG states) written every epoch
+                       -- distinct from best_model.pt so evaluate_checkpoint.py
+                       keeps loading a bare state dict unchanged. Use
+                       --resume last_checkpoint.pt to continue an
+                       interrupted run (e.g. after a Kaggle 12h session cap)
+                       with consistent epoch numbering, best-model
+                       selection (min val_eer_all), and history.json.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 import time
 from pathlib import Path
@@ -42,6 +58,26 @@ from sigver.data.augmentation import MorphAugment  # noqa: E402
 from sigver.models.siamese import SiameseNetwork  # noqa: E402
 from sigver.losses import ContrastiveLoss  # noqa: E402
 from sigver.evaluation.metrics import compute_eer, roc_auc  # noqa: E402
+
+
+def _rng_state() -> dict:
+    """Snapshot torch/numpy/python-random RNG state (+ CUDA if in use)."""
+    state = {
+        "torch": torch.get_rng_state(),
+        "numpy": np.random.get_state(),
+        "python": random.getstate(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: dict) -> None:
+    torch.set_rng_state(state["torch"])
+    np.random.set_state(state["numpy"])
+    random.setstate(state["python"])
+    if "torch_cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
 
 
 def evaluate(model, loader, device):
@@ -72,24 +108,36 @@ def main() -> int:
                          "BHSig; use --no-cache for GPDS/institutional)")
     ap.add_argument("--no-augment", action="store_true",
                     help="disable training-time morphological augmentation")
-    ap.add_argument("--out", default=None,
+    ap.add_argument("--out", "--out-dir", dest="out", default=None,
                     help="output dir (default experiments/siamese_smallcnn_<dataset>)")
+    ap.add_argument("--raw-root", default=None,
+                    help="override raw-data root (default data/raw under the "
+                         "project root; e.g. /kaggle/input/<dataset-name> on Kaggle)")
+    ap.add_argument("--device", default=None, choices=["cpu", "cuda"],
+                    help="override device autodetection (default: cuda if available)")
+    ap.add_argument("--resume", default=None,
+                    help="path to a last_checkpoint.pt to resume training from")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    random.seed(args.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device) if args.device else (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    print(f"[device] {device}")
     out_dir = Path(args.out) if args.out else (
         Path("experiments") / f"siamese_smallcnn_{args.dataset}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
+    raw_root = Path(args.raw_root) if args.raw_root else None
 
     # ---- data -------------------------------------------------------------
     print(f"[data] loading {args.dataset} (cache={args.cache}) ...")
     t0 = time.time()
-    train_samples = list_samples(args.dataset, "train")
-    val_samples = list_samples(args.dataset, "val")
+    train_samples = list_samples(args.dataset, "train", raw_root=raw_root)
+    val_samples = list_samples(args.dataset, "val", raw_root=raw_root)
 
     train_pairs = generate_pairs(train_samples, seed=args.seed)
     val_pairs = generate_pairs(val_samples, seed=args.seed + 1)
@@ -126,11 +174,26 @@ def main() -> int:
     val_kinds = np.array([p.kind for p in val_pairs])
     skilled_mask = (val_kinds == "positive") | (val_kinds == "skilled")
 
-    # ---- training loop ------------------------------------------------------
+    # ---- resume (optional) -------------------------------------------------
+    start_epoch = 1
     history = []
     best_eer = float("inf")
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume:
+        resume_path = Path(args.resume)
+        print(f"[resume] loading {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        _restore_rng_state(ckpt["rng_state"])
+        best_eer = ckpt["best_eer"]
+        history = ckpt["history"]
+        start_epoch = ckpt["epoch"] + 1
+        print(f"[resume] resuming at epoch {start_epoch} "
+              f"(best val EER so far: {best_eer:.4f})")
+
+    # ---- training loop ------------------------------------------------------
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         epoch_loss, n_batches = 0.0, 0
         t_epoch = time.time()
@@ -173,6 +236,19 @@ def main() -> int:
             print(f"          new best (EER {best_eer:.4f}) -> saved")
 
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))
+
+        # last_checkpoint.pt: full resumable state, distinct from
+        # best_model.pt (a bare state_dict so evaluate_checkpoint.py keeps
+        # working unchanged). Written every epoch so a Kaggle session that
+        # hits the 12h cap can resume with --resume without losing an epoch.
+        torch.save({
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_eer": best_eer,
+            "history": history,
+            "rng_state": _rng_state(),
+        }, out_dir / "last_checkpoint.pt")
 
     print(f"\nDone. Best val EER: {best_eer:.4f}. Artifacts in {out_dir}")
     return 0
