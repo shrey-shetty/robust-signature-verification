@@ -182,7 +182,7 @@ def main() -> int:
     if args.resume:
         resume_path = Path(args.resume)
         print(f"[resume] loading {resume_path}")
-        ckpt = torch.load(resume_path, map_location=device)
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         _restore_rng_state(ckpt["rng_state"])
