@@ -73,7 +73,7 @@ def _rng_state() -> dict:
 
 
 def _restore_rng_state(state: dict) -> None:
-    torch.set_rng_state(state["torch"])
+    torch.set_rng_state(state["torch"].cpu())
     np.random.set_state(state["numpy"])
     random.setstate(state["python"])
     if "torch_cuda" in state and torch.cuda.is_available():
