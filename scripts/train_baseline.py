@@ -77,7 +77,7 @@ def _restore_rng_state(state: dict) -> None:
     np.random.set_state(state["numpy"])
     random.setstate(state["python"])
     if "torch_cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["torch_cuda"])
+        torch.cuda.set_rng_state_all([s.cpu() for s in state["torch_cuda"]])
 
 
 def evaluate(model, loader, device):
