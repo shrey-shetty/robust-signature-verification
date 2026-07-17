@@ -155,8 +155,14 @@ def main() -> int:
                          val_pairs)
     print(f"[data] ready in {time.time() - t0:.1f}s")
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size)
+    ap.add_argument("--num-workers", type=int, default=0,
+                help="DataLoader worker processes (0=main thread only; "
+                     "use >0 with --no-cache to avoid CPU-bound disk I/O "
+                     "starving the GPU, e.g. on institutional/GPDS)")
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                          num_workers=args.num_workers, pin_memory=(device.type == "cuda"))
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size,
+                        num_workers=args.num_workers, pin_memory=(torch.device.type == "cuda"))
 
     # ---- model ------------------------------------------------------------
     model = SiameseNetwork(embedding_dim=args.embedding_dim).to(device)
