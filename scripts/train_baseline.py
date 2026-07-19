@@ -20,6 +20,8 @@ Path/device overrides (defaults reproduce local behavior exactly):
     --out / --out-dir <dir>  output dir (default experiments/siamese_smallcnn_<dataset>)
     --device cpu|cuda  override autodetection (default: cuda if available)
     --resume <path>    resume from a last_checkpoint.pt (see below)
+    --patience <int>   stop early if val_eer_all hasn't improved for this
+                       many consecutive epochs (default: None, disabled)
 
 Outputs (under --out, default experiments/<name>):
     best_model.pt      state dict of the best-val-EER model
@@ -121,6 +123,10 @@ def main() -> int:
                     help="DataLoader worker processes (0=main thread only; "
                          "use >0 with --no-cache to avoid CPU-bound disk I/O "
                          "starving the GPU, e.g. on institutional/GPDS)")
+    ap.add_argument("--patience", type=int, default=None,
+                    help="early-stop if val_eer_all does not improve for this "
+                         "many consecutive epochs (default: None = disabled, "
+                         "trains the full --epochs)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -184,6 +190,7 @@ def main() -> int:
     start_epoch = 1
     history = []
     best_eer = float("inf")
+    epochs_since_improvement = 0
 
     if args.resume:
         resume_path = Path(args.resume)
@@ -195,8 +202,16 @@ def main() -> int:
         best_eer = ckpt["best_eer"]
         history = ckpt["history"]
         start_epoch = ckpt["epoch"] + 1
+        # older checkpoints (saved before --patience existed) won't have
+        # this key; fall back to 0 so resuming never stops immediately
+        epochs_since_improvement = ckpt.get("epochs_since_improvement", 0)
         print(f"[resume] resuming at epoch {start_epoch} "
-              f"(best val EER so far: {best_eer:.4f})")
+              f"(best val EER so far: {best_eer:.4f}, "
+              f"epochs since improvement: {epochs_since_improvement})")
+
+    if args.patience is not None:
+        print(f"[early-stop] patience={args.patience} epochs "
+              f"(monitoring val_eer_all)")
 
     # ---- training loop ------------------------------------------------------
     for epoch in range(start_epoch, args.epochs + 1):
@@ -234,12 +249,18 @@ def main() -> int:
 
         if eer_all < best_eer:
             best_eer = eer_all
+            epochs_since_improvement = 0
             torch.save(model.state_dict(), out_dir / "best_model.pt")
             # sidecar: makes the checkpoint self-documenting without
             # changing its format (evaluate_checkpoint.py keeps working)
             (out_dir / "best_info.json").write_text(json.dumps(
                 history[-1] | {"selected_by": "min val_eer_all"}, indent=2))
             print(f"          new best (EER {best_eer:.4f}) -> saved")
+        else:
+            epochs_since_improvement += 1
+            if args.patience is not None:
+                print(f"          no improvement for "
+                      f"{epochs_since_improvement}/{args.patience} epochs")
 
         (out_dir / "history.json").write_text(json.dumps(history, indent=2))
 
@@ -254,7 +275,18 @@ def main() -> int:
             "best_eer": best_eer,
             "history": history,
             "rng_state": _rng_state(),
+            "epochs_since_improvement": epochs_since_improvement,
         }, out_dir / "last_checkpoint.pt")
+
+        if args.patience is not None and epochs_since_improvement >= args.patience:
+            print(f"\n[early-stop] no val_eer_all improvement for "
+                  f"{epochs_since_improvement} epochs (patience={args.patience}). "
+                  f"Stopping at epoch {epoch}.")
+            (out_dir / "best_info.json").write_text(json.dumps(
+                json.loads((out_dir / "best_info.json").read_text())
+                | {"stopped_early": True, "stopped_at_epoch": epoch},
+                indent=2))
+            break
 
     print(f"\nDone. Best val EER: {best_eer:.4f}. Artifacts in {out_dir}")
     return 0
