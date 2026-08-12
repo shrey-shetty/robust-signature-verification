@@ -7,13 +7,30 @@ for the heterogeneous resolutions across our five datasets:
   2. Estimate background with Otsu's threshold; set background pixels to
      white, keep foreground (ink) in grayscale.
   3. Binarize: background = 0, ink = 255. Grayscale ink intensity is
-     deliberately discarded — CEDAR carries a class-conditional
-     brightness artifact that acts as a shortcut feature if preserved.
+     deliberately discarded here, before the tight crop — CEDAR carries
+     a class-conditional brightness artifact that acts as a shortcut
+     feature if preserved (see preproc_cedar_shortcut_eer.csv).
   4. Tight-crop to the bounding box of the ink.
   5. Pad to the target aspect ratio (centered), then resize to the
-     target size (default H=150, W=220, as in Hafemann et al.).
+     target size (default H=150, W=220, as in Hafemann et al.) using
+     bilinear interpolation for accurate sub-pixel mask geometry, then
+     re-threshold the resized array back to strict binary. Resizing a
+     0/255 mask with bilinear interpolation reintroduces intermediate
+     gray values at stroke edges (anti-aliasing); left alone, that
+     residual gradient is enough to reconstruct a per-image mean
+     intensity that still correlates with the class label (measured
+     EER ~0.36 on CEDAR even with step-3 binarization applied). The
+     post-resize re-threshold removes it, restoring the "ink axis
+     removed by construction" guarantee for the array this function
+     actually returns.
 
-Output arrays are float32 in [0, 1], shape (H, W).
+Output arrays are float32, shape (H, W), values strictly in {0.0, 1.0}
+(background=0.0, ink=1.0) — binary end to end, not merely binary before
+the resize step. No per-pixel grayscale statistic of the output (mean,
+std, ...) can carry ink-intensity information; only stroke shape/geometry
+survives. This is PREPROCESSING_VERSION 2 (v1 kept ink in grayscale;
+v1.5 — the CEDAR-freeze-diagnostic commit — binarized before the crop
+but not after the resize, leaving the edge-antialiasing leak above).
 
 Usage as a module:
     from sigver.data.preprocessing import preprocess_image
@@ -35,6 +52,13 @@ from PIL import Image
 
 TARGET_HEIGHT = 150
 TARGET_WIDTH = 220
+
+# Bumped whenever preprocess_array's output contract changes (dtype,
+# value range, or the pixels it produces for the same input). Consumers
+# that persist preprocessed arrays to disk should fold this into their
+# cache key/filename so a stale on-disk cache from an older version
+# can never be silently reused.
+PREPROCESSING_VERSION = 2
 
 
 def otsu_threshold(gray: np.ndarray) -> int:
@@ -82,15 +106,14 @@ def preprocess_array(gray: np.ndarray,
     if not ink_mask.any():
         raise ValueError("no ink found after Otsu thresholding (blank image?)")
 
-    # 3. Binarize: background -> 0, ink -> 255.
+    # 3. Binarize (pass 1 of 2, pre-crop): background -> 0, ink -> 255.
     # Ink is deliberately NOT kept in grayscale: CEDAR scans carry a
     # class-conditional brightness artifact (genuine vs forged mean ink
     # intensity differs), which survives grayscale-preserving
-    # preprocessing and is exploitable as a shortcut (intensity-only
-    # EER 0.322, see preproc_cedar_shortcut_eer.csv). Binarization
-    # removes all ink-intensity statistics by construction; stroke
-    # shape is preserved, and the later bilinear resize keeps edges
-    # soft (anti-aliased) rather than hard.
+    # preprocessing and is exploitable as a shortcut (see
+    # preproc_cedar_shortcut_eer.csv). This pass alone is not sufficient
+    # -- the resize below reintroduces gray values at edges -- see the
+    # second binarization pass after resize.
     inverted = np.zeros_like(gray)
     inverted[ink_mask] = 255
 
@@ -118,16 +141,29 @@ def preprocess_array(gray: np.ndarray,
         left, right = pad // 2, pad - pad // 2
         padded = np.pad(cropped, ((0, 0), (left, right)))
 
+    # Bilinear (not nearest-neighbor) so the downsampled/upsampled mask
+    # keeps accurate sub-pixel stroke geometry -- nearest-neighbor would
+    # alias thin strokes into jagged or broken lines. This is the step
+    # that reintroduces intermediate gray values at ink edges.
     resized = Image.fromarray(padded).resize(
         (target_w, target_h), Image.Resampling.BILINEAR
     )
-    return np.asarray(resized, dtype=np.float32) / 255.0
+    resized_arr = np.asarray(resized, dtype=np.uint8)
+
+    # Binarize (pass 2 of 2, post-resize): collapse the anti-aliased
+    # edges from the resize back to strict {0, 255} at the midpoint
+    # threshold. Without this pass the returned array is only "mostly"
+    # binary, and the residual edge gradient alone is enough to recover
+    # a per-image mean-intensity statistic that correlates with the
+    # class label (the CEDAR shortcut this binarization exists to kill).
+    binary = (resized_arr > 127).astype(np.float32)
+    return binary
 
 
 def preprocess_image(path: str | Path,
                      target_h: int = TARGET_HEIGHT,
                      target_w: int = TARGET_WIDTH) -> np.ndarray:
-    """Full pipeline: load from disk -> float32 (H, W) in [0, 1]."""
+    """Full pipeline: load from disk -> float32 (H, W), values in {0.0, 1.0}."""
     with Image.open(path) as img:
         gray = np.asarray(img.convert("L"), dtype=np.uint8)
     return preprocess_array(gray, target_h=target_h, target_w=target_w)
