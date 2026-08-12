@@ -42,12 +42,18 @@ TABLE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def intensity_only_eer(stats: pd.DataFrame, n_pairs: int = 4000,
-                       seed: int = RNG_SEED) -> float:
+                       seed: int = RNG_SEED) -> tuple[float, bool]:
     """EER using |mean ink intensity difference| alone as the match score.
 
     Positive pairs: genuine-genuine (same writer).
     Negative pairs: genuine vs skilled forgery (same writer).
     Accept if score < threshold.
+
+    Returns (eer, crossing_found). ``crossing_found`` is False when no
+    threshold in the sweep landed within the 0.01 FAR/FRR tolerance, in
+    which case ``eer`` is just the unmet 0.5 initialization value, not a
+    measured result -- callers must check this flag rather than reading
+    0.5 as "no shortcut signal."
     """
     rng = np.random.default_rng(seed)
     by_writer_lbl = {
@@ -69,20 +75,20 @@ def intensity_only_eer(stats: pd.DataFrame, n_pairs: int = 4000,
     scores, labels = np.asarray(scores), np.asarray(labels)
     thrs = np.unique(scores)
     best = 0.5
+    crossing_found = False
     for thr in thrs:
         far = float((scores[labels == 0] < thr).mean())
         frr = float((scores[labels == 1] >= thr).mean())
         if abs(far - frr) < 0.01:
+            crossing_found = True
             best = min(best, (far + frr) / 2)
-    return best
+    return best, crossing_found
 
 
-def stat_eer(stats: pd.DataFrame, col: str) -> float:
+def stat_eer(stats: pd.DataFrame, col: str) -> tuple[float, bool]:
     """Run intensity_only_eer using an arbitrary column as the score."""
-    return intensity_only_eer(
-        stats.rename(columns={col: "mean_ink_intensity"})
-        [["writer_id", "label", "mean_ink_intensity"]]
-    )
+    df = stats[["writer_id", "label", col]].rename(columns={col: "mean_ink_intensity"})
+    return intensity_only_eer(df)
 
 
 def main() -> int:
@@ -124,16 +130,14 @@ def main() -> int:
     fig.savefig(FIG_DIR / "cedar_ink_intensity_by_class.png",
                 dpi=150, bbox_inches="tight")
 
-    eer = intensity_only_eer(ink_stats)
-    print(f"\nIntensity-only EER (CEDAR, genuine vs skilled forgery): {eer:.3f}")
+    eer, crossing_found = intensity_only_eer(ink_stats)
+    print(f"\nIntensity-only EER (CEDAR, genuine vs skilled forgery): {eer:.3f} "
+          f"(crossing_found={crossing_found})")
     print("~0.5 => brightness carries no signal (good). Meaningfully below "
           "0.5 => shortcut survives preprocessing; consider per-image ink "
-          "normalization or binarization before freezing.")
-
-    pd.DataFrame([{"intensity_only_eer": eer,
-                   "n_images": len(ink_stats)}]).to_csv(
-        TABLE_DIR / "preproc_cedar_shortcut_eer.csv", index=False)
-    print(f"\nSaved -> {TABLE_DIR / 'preproc_cedar_shortcut_eer.csv'}")
+          "normalization or binarization before freezing. crossing_found=False "
+          "means no threshold satisfied the FAR/FRR tolerance -- the EER above "
+          "is NOT a measured result in that case, whatever its value.")
 
     # fragmentation: connected components in the final binary output
     n_comp = []
@@ -146,10 +150,31 @@ def main() -> int:
         n_comp.append(n - 1)  # minus background
     ink_stats["n_components"] = n_comp
 
-    for col in ["mean_ink_intensity", "ink_fraction", "n_components"]:
-        print(f"{col:22s} EER {stat_eer(ink_stats, col):.3f} | "
+    stat_results = {"mean_ink_intensity": (eer, crossing_found)}
+    for col in ["ink_fraction", "n_components"]:
+        col_eer, col_crossing = stat_eer(ink_stats, col)
+        stat_results[col] = (col_eer, col_crossing)
+        print(f"{col:22s} EER {col_eer:.3f} (crossing_found={col_crossing}) | "
               f"forgery {ink_stats[ink_stats.label=='forgery'][col].mean():.3f} "
               f"genuine {ink_stats[ink_stats.label=='genuine'][col].mean():.3f}")
+
+    # NOTE: PREPROCESSING_VERSION does not currently exist in
+    # sigver.data.preprocessing on this branch (see 2026-07-27 investigation --
+    # the commit that introduced it, 49444da4, never made it onto main). A
+    # pipeline_version column is deliberately NOT written here: stamping a
+    # version number that doesn't exist in the code that produced these
+    # numbers would be worse than omitting it. Add this column once that is
+    # resolved.
+    pd.DataFrame([{
+        "intensity_only_eer": stat_results["mean_ink_intensity"][0],
+        "intensity_only_crossing_found": stat_results["mean_ink_intensity"][1],
+        "ink_fraction_eer": stat_results["ink_fraction"][0],
+        "ink_fraction_crossing_found": stat_results["ink_fraction"][1],
+        "n_components_eer": stat_results["n_components"][0],
+        "n_components_crossing_found": stat_results["n_components"][1],
+        "n_images": len(ink_stats),
+    }]).to_csv(TABLE_DIR / "preproc_cedar_shortcut_eer.csv", index=False)
+    print(f"\nSaved -> {TABLE_DIR / 'preproc_cedar_shortcut_eer.csv'}")
 
     # Attribution check: does raw ink darkness predict preprocessed
     # stroke width (mean intensity of the binary output)?
