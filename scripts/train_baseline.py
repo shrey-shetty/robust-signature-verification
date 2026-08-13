@@ -17,7 +17,7 @@ Usage (from project root):
 Path/device overrides (defaults reproduce local behavior exactly):
     --raw-root <dir>   raw-data root (default data/raw under project root;
                        e.g. /kaggle/input/<dataset-name> on Kaggle)
-    --out / --out-dir <dir>  output dir (default experiments/siamese_smallcnn_<dataset>)
+    --out / --out-dir <dir>  output dir (default experiments/siamese_<backbone>_<dataset>)
     --device cpu|cuda  override autodetection (default: cuda if available)
     --resume <path>    resume from a last_checkpoint.pt (see below)
 
@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -56,6 +57,8 @@ from sigver.data.datasets import list_samples, SignatureDataset  # noqa: E402
 from sigver.data.pairs import generate_pairs, pair_summary, PairDataset  # noqa: E402
 from sigver.data.augmentation import MorphAugment  # noqa: E402
 from sigver.models.siamese import SiameseNetwork  # noqa: E402
+from sigver.models.backbones import build_backbone, BACKBONE_NAMES  # noqa: E402
+from sigver.data.preprocessing import PREPROCESSING_VERSION  # noqa: E402
 from sigver.losses import ContrastiveLoss  # noqa: E402
 from sigver.evaluation.metrics import compute_eer, roc_auc  # noqa: E402
 
@@ -70,6 +73,22 @@ def _rng_state() -> dict:
     if torch.cuda.is_available():
         state["torch_cuda"] = torch.cuda.get_rng_state_all()
     return state
+
+
+def _git_provenance() -> dict:
+    """Record which code produced this run. Never fails the run."""
+    def _git(*args):
+        try:
+            return subprocess.check_output(
+                ["git", *args], cwd=Path(__file__).resolve().parents[1],
+                stderr=subprocess.DEVNULL, text=True).strip()
+        except Exception:
+            return None
+    return {
+        "commit": _git("rev-parse", "HEAD"),
+        "branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": bool(_git("status", "--porcelain")),
+    }
 
 
 def _restore_rng_state(state: dict) -> None:
@@ -109,7 +128,7 @@ def main() -> int:
     ap.add_argument("--no-augment", action="store_true",
                     help="disable training-time morphological augmentation")
     ap.add_argument("--out", "--out-dir", dest="out", default=None,
-                    help="output dir (default experiments/siamese_smallcnn_<dataset>)")
+                    help="output dir (default experiments/siamese_<backbone>_<dataset>)")
     ap.add_argument("--raw-root", default=None,
                     help="override raw-data root (default data/raw under the "
                          "project root; e.g. /kaggle/input/<dataset-name> on Kaggle)")
@@ -131,6 +150,16 @@ def main() -> int:
                     help="L2 weight decay passed to Adam (default: 0.0, i.e. "
                          "off, matching all prior runs). A direct lever "
                          "against overfitting, distinct from --lr.")
+    ap.add_argument("--backbone", default="smallcnn", choices=BACKBONE_NAMES,
+                    help="embedding backbone (default: smallcnn, the PR2 baseline)")
+    ap.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True,
+                    help="load ImageNet weights (ignored for smallcnn)")
+    ap.add_argument("--l2-normalize", action="store_true",
+                    help="L2-normalise embeddings; changes the distance scale, "
+                         "so --margin must be revisited if set")
+    ap.add_argument("--input-norm", default="none",
+                    choices=["none", "symmetric", "imagenet"],
+                    help="input standardisation (default: none, baseline-identical)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -142,7 +171,7 @@ def main() -> int:
     )
     print(f"[device] {device}")
     out_dir = Path(args.out) if args.out else (
-        Path("experiments") / f"siamese_smallcnn_{args.dataset}"
+        Path("experiments") / f"siamese_{args.backbone}_{args.dataset}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_root = Path(args.raw_root) if args.raw_root else None
@@ -175,7 +204,12 @@ def main() -> int:
                         num_workers=args.num_workers, pin_memory=(device.type == "cuda"))
 
     # ---- model ------------------------------------------------------------
-    model = SiameseNetwork(embedding_dim=args.embedding_dim).to(device)
+    backbone = build_backbone(args.backbone,
+                              embedding_dim=args.embedding_dim,
+                              pretrained=args.pretrained and args.backbone != "smallcnn",
+                              l2_normalize=args.l2_normalize,
+                              input_norm=args.input_norm)
+    model = SiameseNetwork(backbone=backbone).to(device)
     criterion = ContrastiveLoss(margin=args.margin)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
@@ -184,6 +218,8 @@ def main() -> int:
 
     config = dict(vars(args))
     config["augment"] = repr(augment)
+    config["git"] = _git_provenance()
+    config["preprocessing_version"] = PREPROCESSING_VERSION
     (out_dir / "config.json").write_text(json.dumps(config, indent=2,
                                                     default=str))
 
