@@ -18,8 +18,22 @@ Path/device overrides (defaults reproduce local behavior exactly):
                        the checkpoint, i.e. Path(checkpoint).parent)
     --device cpu|cuda  override autodetection (default: cuda if available)
 
+Architecture (--backbone / --l2-normalize / --input-norm / --embedding-dim):
+    These four default to None and are resolved, in order, from: (1) an
+    explicit CLI flag, (2) config.json sitting next to the checkpoint
+    (i.e. Path(checkpoint).parent / "config.json", the file
+    train_baseline.py writes into its --out directory), (3) a hardcoded
+    fallback (smallcnn / False / "none" / 128) if config.json is absent
+    or unparseable. A line is printed for each of the four showing which
+    source won. This exists because a wrong l2_normalize or input_norm
+    can load successfully and silently produce wrong metrics (input_norm
+    ="imagenet" registers buffers that make a mismatch fail loudly, but
+    "symmetric" does not) -- reading the architecture from the run's own
+    config.json avoids having to get it right by hand every time.
+
 Outputs (next to the checkpoint, unless --out-dir overrides it):
-    test_metrics.json   EER/AUC/FAR/FRR + run details
+    test_metrics.json   EER/AUC/FAR/FRR + run details (incl. the resolved
+                       backbone/l2_normalize/input_norm/config_source)
     test_scores.csv     per-pair distance, label, kind (for ROC plots later)
 """
 
@@ -40,6 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sigver.data.datasets import list_samples, SignatureDataset  # noqa: E402
 from sigver.data.pairs import generate_pairs, pair_summary, PairDataset  # noqa: E402
 from sigver.models.siamese import SiameseNetwork  # noqa: E402
+from sigver.models.backbones import build_backbone, BACKBONE_NAMES  # noqa: E402
 from sigver.evaluation.metrics import compute_eer, roc_auc  # noqa: E402
 
 
@@ -55,6 +70,55 @@ def collect_distances(model, loader, device):
             dists.append(d.cpu().numpy())
             labels.append(y.numpy())
     return np.concatenate(dists), np.concatenate(labels)
+
+
+_CONFIG_DEFAULTABLE = {
+    "backbone": "smallcnn",
+    "l2_normalize": False,
+    "input_norm": "none",
+    "embedding_dim": 128,
+}
+
+
+def _resolve_arch_from_config(args) -> str:
+    """Fill backbone/l2_normalize/input_norm/embedding_dim from the
+    checkpoint's config.json when not passed explicitly on the CLI.
+
+    Precedence per field: explicit CLI flag > config.json (next to the
+    checkpoint) > hardcoded fallback. Mutates `args` in place and prints
+    one line per field showing which source won. Returns a short string
+    describing where config.json was (or was not) found, for
+    test_metrics.json's config_source field.
+    """
+    config_path = Path(args.checkpoint).parent / "config.json"
+    config = None
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text())
+            config_source = str(config_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            config_source = f"{config_path} present but unparseable ({exc})"
+    else:
+        config_source = f"{config_path} not found"
+
+    if config is None:
+        print(f"[config] WARNING: {config_source} -- backbone/l2_normalize/"
+              f"input_norm/embedding_dim not given explicitly will use "
+              f"hardcoded fallback defaults, NOT values from a training run.")
+
+    for key, fallback in _CONFIG_DEFAULTABLE.items():
+        current = getattr(args, key)
+        if current is not None:
+            origin = "explicit flag"
+        elif config is not None and key in config:
+            setattr(args, key, config[key])
+            origin = "from config.json"
+        else:
+            setattr(args, key, fallback)
+            origin = "default" if config is None else "default (key missing in config.json)"
+        print(f"[config] {key}={getattr(args, key)} ({origin})")
+
+    return config_source
 
 
 def far_frr_at_threshold(dists: np.ndarray, labels: np.ndarray,
@@ -82,7 +146,20 @@ def main() -> int:
     ap.add_argument("--split", default="test",
                     help="split to evaluate (default: test)")
     ap.add_argument("--batch-size", type=int, default=32)
-    ap.add_argument("--embedding-dim", type=int, default=128)
+    ap.add_argument("--embedding-dim", type=int, default=None,
+                    help="embedding dimension (default: read from the "
+                         "checkpoint's config.json; falls back to 128)")
+    ap.add_argument("--backbone", default=None, choices=BACKBONE_NAMES,
+                    help="embedding backbone (default: read from the "
+                         "checkpoint's config.json; falls back to smallcnn)")
+    ap.add_argument("--l2-normalize", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="L2-normalise embeddings (default: read from the "
+                         "checkpoint's config.json; falls back to False)")
+    ap.add_argument("--input-norm", default=None,
+                    choices=["none", "symmetric", "imagenet"],
+                    help="input standardisation (default: read from the "
+                         "checkpoint's config.json; falls back to none)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--cache", action="store_true",
                     help="cache preprocessed images in RAM")
@@ -106,6 +183,7 @@ def main() -> int:
     out_dir = Path(args.out) if args.out else ckpt_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_root = Path(args.raw_root) if args.raw_root else None
+    config_source = _resolve_arch_from_config(args)
 
     # ---- data ---------------------------------------------------------
     print(f"[data] loading {args.dataset} / {args.split} split ...")
@@ -120,7 +198,15 @@ def main() -> int:
     print(f"[data] ready in {time.time() - t0:.1f}s")
 
     # ---- model --------------------------------------------------------
-    model = SiameseNetwork(embedding_dim=args.embedding_dim).to(device)
+    # pretrained=False always: the checkpoint supplies every weight, so
+    # downloading ImageNet weights here would be wasted time regardless
+    # of what the training run used.
+    backbone = build_backbone(args.backbone,
+                              embedding_dim=args.embedding_dim,
+                              pretrained=False,
+                              l2_normalize=args.l2_normalize,
+                              input_norm=args.input_norm)
+    model = SiameseNetwork(backbone=backbone).to(device)
     state = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(state)
     print(f"[model] loaded {ckpt_path} on {device}")
@@ -154,6 +240,13 @@ def main() -> int:
         "dataset": args.dataset,
         "split": args.split,
         "checkpoint": str(ckpt_path),
+        # architecture actually used to load this checkpoint -- see
+        # _resolve_arch_from_config -- so a metrics file is self-documenting
+        # about which construction produced it.
+        "backbone": args.backbone,
+        "l2_normalize": args.l2_normalize,
+        "input_norm": args.input_norm,
+        "config_source": config_source,
         "n_pairs": int(len(labels)),
         "n_pairs_skilled_subset": int(skilled_mask.sum()),
         # threshold-free metrics
