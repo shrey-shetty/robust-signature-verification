@@ -14,6 +14,13 @@ stays deterministic.
 Usage (from project root):
     .\\.venv\\Scripts\\python.exe scripts\\train_baseline.py --dataset cedar --epochs 10
 
+    --dataset also accepts a comma-separated list, e.g.
+    --dataset institutional,cedar, to train on the union of writers from
+    several corpora (RQ3). Each dataset keeps its own split CSV under
+    data/splits/; writer IDs are namespaced per dataset before pairs are
+    generated so two datasets' raw writer_id ranges can never collide (see
+    sigver.data.datasets.list_samples_multi).
+
 Path/device overrides (defaults reproduce local behavior exactly):
     --raw-root <dir>   raw-data root (default data/raw under project root;
                        e.g. /kaggle/input/<dataset-name> on Kaggle)
@@ -53,7 +60,9 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from sigver.data.datasets import list_samples, SignatureDataset  # noqa: E402
+from sigver.data.datasets import (  # noqa: E402
+    list_samples_multi, writer_counts_by_dataset, SignatureDataset,
+)
 from sigver.data.pairs import generate_pairs, pair_summary, PairDataset  # noqa: E402
 from sigver.data.augmentation import MorphAugment  # noqa: E402
 from sigver.models.siamese import SiameseNetwork  # noqa: E402
@@ -99,6 +108,16 @@ def _restore_rng_state(state: dict) -> None:
         torch.cuda.set_rng_state_all([s.cpu() for s in state["torch_cuda"]])
 
 
+def _dataset_list(value: str) -> list[str]:
+    """argparse type for --dataset: comma-separated list, single name still works."""
+    names = [v.strip() for v in value.split(",")]
+    if any(not n for n in names):
+        raise argparse.ArgumentTypeError(
+            f"--dataset: empty dataset name in {value!r} (expected e.g. "
+            f"'cedar' or 'institutional,cedar')")
+    return names
+
+
 def evaluate(model, loader, device):
     """Return (distances, labels) over a pair loader."""
     model.eval()
@@ -113,9 +132,11 @@ def evaluate(model, loader, device):
     return np.concatenate(dists), np.concatenate(labels)
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", default="cedar")
+    ap.add_argument("--dataset", default="cedar", type=_dataset_list,
+                    help="dataset name, or comma-separated list to train on "
+                         "the union (e.g. 'institutional,cedar')")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -160,7 +181,21 @@ def main() -> int:
     ap.add_argument("--input-norm", default="none",
                     choices=["none", "symmetric", "imagenet"],
                     help="input standardisation (default: none, baseline-identical)")
-    args = ap.parse_args()
+    ap.add_argument("--max-positive-per-writer", type=int, default=None,
+                    help="cap genuine-genuine combinations per writer when "
+                         "building pairs (default: None = use all "
+                         "combinations, i.e. today's behaviour unchanged). "
+                         "Set this when combining corpora with different "
+                         "genuine-samples-per-writer counts (RQ3) so every "
+                         "writer contributes the same number of positive "
+                         "pairs regardless of source dataset, instead of "
+                         "corpora with more genuine samples per writer "
+                         "dominating the positive-pair count.")
+    return ap
+
+
+def main() -> int:
+    args = build_arg_parser().parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -170,8 +205,9 @@ def main() -> int:
         torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
     print(f"[device] {device}")
+    dataset_tag = "+".join(args.dataset)  # filesystem-safe even for a combined list
     out_dir = Path(args.out) if args.out else (
-        Path("experiments") / f"siamese_{args.backbone}_{args.dataset}"
+        Path("experiments") / f"siamese_{args.backbone}_{dataset_tag}"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
     raw_root = Path(args.raw_root) if args.raw_root else None
@@ -179,11 +215,18 @@ def main() -> int:
     # ---- data -------------------------------------------------------------
     print(f"[data] loading {args.dataset} (cache={args.cache}) ...")
     t0 = time.time()
-    train_samples = list_samples(args.dataset, "train", raw_root=raw_root)
-    val_samples = list_samples(args.dataset, "val", raw_root=raw_root)
+    train_samples, dataset_offsets = list_samples_multi(args.dataset, "train", raw_root=raw_root)
+    val_samples, _ = list_samples_multi(args.dataset, "val", raw_root=raw_root)
+    train_writer_counts = writer_counts_by_dataset(train_samples, dataset_offsets)
+    val_writer_counts = writer_counts_by_dataset(val_samples, dataset_offsets)
+    print(f"[data] train writers by dataset: {train_writer_counts}")
+    print(f"[data] val writers by dataset:   {val_writer_counts}")
 
-    train_pairs = generate_pairs(train_samples, seed=args.seed)
-    val_pairs = generate_pairs(val_samples, seed=args.seed + 1)
+    print(f"[data] max_positive_per_writer: {args.max_positive_per_writer}")
+    train_pairs = generate_pairs(train_samples, seed=args.seed,
+                                 max_positive_per_writer=args.max_positive_per_writer)
+    val_pairs = generate_pairs(val_samples, seed=args.seed + 1,
+                               max_positive_per_writer=args.max_positive_per_writer)
     print(f"[data] train pairs: {pair_summary(train_pairs)}")
     print(f"[data] val pairs:   {pair_summary(val_pairs)}")
 
@@ -220,6 +263,9 @@ def main() -> int:
     config["augment"] = repr(augment)
     config["git"] = _git_provenance()
     config["preprocessing_version"] = PREPROCESSING_VERSION
+    config["dataset_offsets"] = dataset_offsets
+    config["train_writer_counts"] = train_writer_counts
+    config["val_writer_counts"] = val_writer_counts
     (out_dir / "config.json").write_text(json.dumps(config, indent=2,
                                                     default=str))
 

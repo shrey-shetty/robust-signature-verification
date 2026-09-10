@@ -174,6 +174,80 @@ def list_samples(dataset: str, split: str | None = None,
     return sorted(samples, key=lambda s: str(s.path))
 
 
+# ---------------------------------------------------------------------------
+# Multi-dataset (RQ3): combining corpora requires namespacing writer_id so
+# distinct datasets' writers never collide (pairs.py groups purely on the
+# integer writer_id, with no dataset qualifier).
+# ---------------------------------------------------------------------------
+
+# Largest single corpus is 4,000 writers, so this step is comfortably
+# collision-free between any two datasets' raw writer_id ranges.
+DATASET_ID_OFFSET_STEP = 1_000_000
+
+
+def build_dataset_offsets(dataset_names: list[str]) -> dict[str, int]:
+    """Deterministic per-dataset writer-id namespace offset.
+
+    dataset_index is the position of each name in the sorted order of the
+    *given* dataset_names (not a fixed global catalog order), so the same
+    requested set of datasets always yields the same mapping regardless of
+    the order they were requested in.
+    """
+    ordered = sorted(set(dataset_names))
+    return {name: i * DATASET_ID_OFFSET_STEP for i, name in enumerate(ordered)}
+
+
+def resolve_namespaced_writer(namespaced_id: int, offsets: dict[str, int]) -> tuple[str, int]:
+    """Invert build_dataset_offsets: namespaced writer_id -> (dataset, raw writer_id)."""
+    for name, offset in sorted(offsets.items(), key=lambda kv: kv[1], reverse=True):
+        if namespaced_id >= offset:
+            return name, namespaced_id - offset
+    raise ValueError(f"No dataset offset covers namespaced id {namespaced_id} "
+                     f"(offsets: {offsets})")
+
+
+def writer_counts_by_dataset(samples: list[Sample], offsets: dict[str, int]) -> dict[str, int]:
+    """Count distinct writers per source dataset in a namespaced sample list."""
+    writers_by_name: dict[str, set[int]] = {name: set() for name in offsets}
+    for s in samples:
+        name, raw_id = resolve_namespaced_writer(s.writer_id, offsets)
+        writers_by_name[name].add(raw_id)
+    return {name: len(writers_by_name[name]) for name in offsets}
+
+
+def list_samples_multi(dataset_names: list[str], split: str | None = None,
+                       raw_root: Path | None = None,
+                       ) -> tuple[list[Sample], dict[str, int]]:
+    """Concatenate list_samples(...) across multiple datasets with namespaced writer_ids.
+
+    Each dataset keeps its own split CSV in data/splits/ — this does not
+    invent a new split scheme, it just takes the union of each dataset's
+    per-split writers. Samples are namespaced (see build_dataset_offsets)
+    before concatenation so two datasets' raw writer_id ranges can never
+    collide downstream in pairs.py's writer grouping.
+
+    Returns (samples, offsets); offsets maps dataset name -> the integer
+    added to that dataset's raw writer_id (invert with
+    resolve_namespaced_writer to recover the source dataset + raw id).
+
+    Raises ValueError if any requested dataset has zero writers in the
+    requested split (a silent empty contribution would be worse than a
+    loud failure here).
+    """
+    offsets = build_dataset_offsets(dataset_names)
+    combined: list[Sample] = []
+    for name in dataset_names:
+        base = list_samples(name, split, raw_root=raw_root)
+        if not base:
+            raise ValueError(
+                f"Dataset '{name}' has zero samples in split {split!r} — "
+                f"refusing to silently combine an empty contribution."
+            )
+        offset = offsets[name]
+        combined.extend(Sample(s.path, s.writer_id + offset, s.is_forgery) for s in base)
+    return combined, offsets
+
+
 class SignatureDataset(Dataset):
     """Yields (image_tensor, writer_id, is_forgery) triples.
 
