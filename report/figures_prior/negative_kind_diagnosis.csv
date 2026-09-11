@@ -1,0 +1,8 @@
+label,dataset,backbone,n_pairs,n_genuine,n_skilled,n_random,eer_all,auc_all,eer_skilled,auc_skilled,eer_random,auc_random,ordering,mean_genuine,mean_skilled,mean_random,random_below_genuine_p95
+eval_resnet18_bhsig260_bengali,bhsig260_bengali,resnet18,11040,5520,2760,2760,0.3082,0.7602,0.3825,0.6624,0.2199,0.8579,expected,0.2736,0.3536,0.4961,0.6399
+eval_resnet18_bhsig260_hindi,bhsig260_hindi,resnet18,17664,8832,4416,4416,0.2682,0.7901,0.3123,0.7418,0.2241,0.8384,expected,0.2988,0.4617,0.5725,0.8109
+eval_resnet18_cedar,cedar,resnet18,6072,3036,1518,1518,0.2408,0.8363,0.3195,0.7451,0.1515,0.9275,expected,0.3293,0.5059,0.7897,0.4302
+eval_resnet18_institutional,institutional,resnet18,105600,52800,26400,26400,0.1674,0.9173,0.2311,0.8571,0.0799,0.9776,expected,0.3918,0.7502,1.2231,0.1152
+eval_smallcnn_bhsig260_bengali,bhsig260_bengali,smallcnn,11040,5520,2760,2760,0.2685,0.8087,0.3312,0.729,0.1829,0.8884,expected,0.2954,0.4044,0.5705,0.5351
+eval_smallcnn_bhsig260_hindi,bhsig260_hindi,smallcnn,17664,8832,4416,4416,0.2519,0.8057,0.2948,0.7561,0.2036,0.8552,expected,0.3148,0.4788,0.6012,0.788
+eval_smallcnn_cedar,cedar,smallcnn,6072,3036,1518,1518,0.2105,0.8642,0.2813,0.7728,0.1145,0.9557,expected,0.3323,0.5054,0.8904,0.2767
