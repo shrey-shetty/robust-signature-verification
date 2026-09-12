@@ -47,10 +47,11 @@ SEED = 42
 # Which corpora each arm's validation split was drawn from. This decides whether
 # an operating threshold is legitimate for the corpus being evaluated.
 TRAINED_ON = {
-    "smallcnn":     {"institutional"},
-    "resnet18":     {"institutional"},
-    "resnet34":     {"institutional"},
-    "rq3_combined": {"institutional", "cedar", "bhsig260_bengali", "bhsig260_hindi"},
+    "smallcnn":        {"institutional"},
+    "resnet18":        {"institutional"},
+    "resnet34":        {"institutional"},
+    "efficientnet_b0": {"institutional"},
+    "rq3_combined":    {"institutional", "cedar", "bhsig260_bengali", "bhsig260_hindi"},
 }
 
 
@@ -77,6 +78,33 @@ def load_scores(path):
             k.append(row["kind"])
             wa.append(int(row["writer_a"]))
     return (np.array(d), np.array(l), np.array(k, dtype=object), np.array(wa))
+
+
+DATASET_UNIVERSE = ["institutional", "cedar", "bhsig260_bengali",
+                     "bhsig260_hindi", "gpds_synthetic_4000"]
+
+
+def rq3_training_mix(root):
+    """Read the actual training mix from exp_rq3_combined/config.json.
+
+    Never assume this matches TRAINED_ON["rq3_combined"] above -- read it and
+    compare, so a stale hardcoded set can't silently diverge from what was
+    actually trained on.
+    """
+    cfg_path = os.path.join(root, "results_rq3", "exp_rq3_combined", "config.json")
+    cfg = json.load(open(cfg_path))
+    mix = cfg.get("dataset") or cfg.get("datasets")
+    if set(mix) != TRAINED_ON["rq3_combined"]:
+        raise RuntimeError(
+            f"TRAINED_ON['rq3_combined']={TRAINED_ON['rq3_combined']} does not match "
+            f"config.json dataset field {mix} -- update TRAINED_ON before trusting "
+            f"threshold_provenance or in_training_mix"
+        )
+    held_out = [d for d in DATASET_UNIVERSE if d not in mix]
+    print(f"RQ3 combined training mix: {mix}")
+    print(f"Corpora IN the training mix (improvements are in-domain gains, NOT generalisation): {mix}")
+    print(f"Corpora HELD OUT (the genuine unseen-writer generalisation test): {held_out}")
+    return set(mix)
 
 
 def discover(root):
@@ -218,6 +246,18 @@ def paired_bootstrap(dA, lA, kA, waA, dB, lB, kB, waB, metric="all"):
             "n_pairs": int(sel.sum())}
 
 
+def eer_point(d, l, k, wa, metric):
+    """EER for one arm's own selection -- used only when two arms are not
+    row-aligned and a paired comparison is invalid (see paired_bootstrap)."""
+    if metric == "all":
+        sel = np.ones(len(l), bool)
+    elif metric == "skilled":
+        sel = (l == 1) | ((l == 0) & (k == "skilled"))
+    else:
+        raise ValueError(metric)
+    return eer(d[sel], l[sel])
+
+
 def write_csv(path, rows):
     if not rows:
         return
@@ -244,8 +284,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-root", required=True)
     ap.add_argument("--out", default="report/tables")
+    ap.add_argument("--skip", nargs="*", default=[],
+                     choices=["rq2", "rq3", "rq4"],
+                     help="Skip regenerating these tables (e.g. --skip rq2 to "
+                          "leave rq2_backbone_comparison.csv untouched while a "
+                          "backbone's evaluations are still running elsewhere).")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
+
+    print("=" * 78)
+    mix = rq3_training_mix(args.results_root)
+    print("=" * 78)
+    print()
 
     runs = discover(args.results_root)
     print(f"discovered {len(runs)} evaluation(s):")
@@ -263,65 +313,87 @@ def main():
         return cache[key]
 
     # ---------------- RQ2 -------------------------------------------
-    print("=" * 78)
-    print("RQ2 — backbone comparison (resnet18 vs smallcnn; negative = resnet18 BETTER)")
-    print("=" * 78)
-    rq2 = []
-    for ds in ["institutional", "cedar", "bhsig260_bengali", "bhsig260_hindi"]:
-        A = get(("smallcnn", ds, "test"))
-        B = get(("resnet18", ds, "test"))
-        if A is None or B is None:
-            print(f"  {ds:<20} SKIPPED (missing "
-                  f"{'smallcnn' if A is None else 'resnet18'})")
-            continue
-        for metric in ("all", "skilled"):
-            r = paired_bootstrap(*A, *B, metric=metric)
-            if r is None:
-                print(f"  {ds:<20} {metric:<8} NOT ROW-ALIGNED — paired CI refused")
-                continue
-            print(f"  {ds:<20} {metric:<8} smallcnn {fmt(r['eer_a'])}  "
-                  f"resnet18 {fmt(r['eer_b'])}  diff {r['observed_diff']:+.4f}  "
-                  f"CI [{r['ci_lower']:+.4f}, {r['ci_upper']:+.4f}]"
-                  f"{'  *' if r['separates'] else ''}")
-            rq2.append({"dataset": ds, "metric": f"eer_{metric}",
-                        "eer_smallcnn": round(r["eer_a"], 4),
-                        "eer_resnet18": round(r["eer_b"], 4),
-                        "diff_resnet18_minus_smallcnn": round(r["observed_diff"], 4),
-                        "ci_lower": round(r["ci_lower"], 4),
-                        "ci_upper": round(r["ci_upper"], 4),
-                        "separates_from_zero": r["separates"],
-                        "n_writers": r["n_writers"], "n_pairs": r["n_pairs"]})
-
-    # depth contrast
-    A = get(("resnet18", "institutional", "test"))
-    B = get(("resnet34", "institutional", "test"))
-    if A and B:
-        for metric in ("all", "skilled"):
-            r = paired_bootstrap(*A, *B, metric=metric)
-            if r:
-                print(f"  {'institutional (depth)':<20} {metric:<8} "
-                      f"resnet18 {fmt(r['eer_a'])}  resnet34 {fmt(r['eer_b'])}  "
-                      f"diff {r['observed_diff']:+.4f}  "
-                      f"CI [{r['ci_lower']:+.4f}, {r['ci_upper']:+.4f}]"
-                      f"{'  *' if r['separates'] else ''}")
-                rq2.append({"dataset": "institutional",
-                            "metric": f"depth_eer_{metric}",
-                            "eer_smallcnn": round(r["eer_a"], 4),   # = resnet18 here
-                            "eer_resnet18": round(r["eer_b"], 4),   # = resnet34 here
-                            "diff_resnet18_minus_smallcnn": round(r["observed_diff"], 4),
-                            "ci_lower": round(r["ci_lower"], 4),
-                            "ci_upper": round(r["ci_upper"], 4),
-                            "separates_from_zero": r["separates"],
-                            "n_writers": r["n_writers"], "n_pairs": r["n_pairs"]})
-    write_csv(os.path.join(args.out, "rq2_backbone_comparison.csv"), rq2)
+    if "rq2" in args.skip:
+        print("=" * 78)
+        print("RQ2 — SKIPPED (--skip rq2): rq2_backbone_comparison.csv left untouched")
+        print("=" * 78)
+    else:
+        print("=" * 78)
+        print("RQ2 — backbone comparison, all pairwise combinations "
+              "(negative diff = arm_b BETTER, i.e. lower EER)")
+        print("=" * 78)
+        rq2 = []
+        # Fixed order controls arm_a/arm_b assignment for every pair below:
+        # for any two arms X before Y in this list, X is arm_a and Y is arm_b.
+        # This matches the sanity-check table (smallcnn vs resnet18, resnet18
+        # vs resnet34, resnet18 vs efficientnet_b0 all keep that arm as arm_a).
+        BACKBONE_ARMS = ["smallcnn", "resnet18", "resnet34", "efficientnet_b0"]
+        for ds in ["institutional", "cedar", "bhsig260_bengali", "bhsig260_hindi"]:
+            for i in range(len(BACKBONE_ARMS)):
+                for j in range(i + 1, len(BACKBONE_ARMS)):
+                    arm_a, arm_b = BACKBONE_ARMS[i], BACKBONE_ARMS[j]
+                    A = get((arm_a, ds, "test"))
+                    B = get((arm_b, ds, "test"))
+                    if A is None or B is None:
+                        missing = arm_a if A is None else arm_b
+                        print(f"  {ds:<20} {arm_a} vs {arm_b:<16} SKIPPED (missing {missing})")
+                        continue
+                    for metric in ("all", "skilled"):
+                        r = paired_bootstrap(*A, *B, metric=metric)
+                        if r is not None:
+                            print(f"  {ds:<20} {arm_a} vs {arm_b:<16} {metric:<8} "
+                                  f"{fmt(r['eer_a'])} -> {fmt(r['eer_b'])}  "
+                                  f"diff {r['observed_diff']:+.4f}  "
+                                  f"CI [{r['ci_lower']:+.4f}, {r['ci_upper']:+.4f}]"
+                                  f"{'  *' if r['separates'] else ''}")
+                            rq2.append({
+                                "dataset": ds, "metric": f"eer_{metric}",
+                                "arm_a": arm_a, "arm_b": arm_b,
+                                "eer_a": round(r["eer_a"], 4),
+                                "eer_b": round(r["eer_b"], 4),
+                                "diff_b_minus_a": round(r["observed_diff"], 4),
+                                "ci_lower": round(r["ci_lower"], 4),
+                                "ci_upper": round(r["ci_upper"], 4),
+                                "separates_from_zero": r["separates"],
+                                "n_writers": r["n_writers"], "n_pairs": r["n_pairs"],
+                                "caveat": "",
+                            })
+                        else:
+                            # Not row-aligned: paired bootstrap is invalid here.
+                            # Fall back to each arm's own point EER (independent
+                            # selections), leave CI columns empty, and flag it --
+                            # never present an unpaired interval as paired.
+                            eer_a_pt = eer_point(*A, metric)
+                            eer_b_pt = eer_point(*B, metric)
+                            print(f"  {ds:<20} {arm_a} vs {arm_b:<16} {metric:<8} "
+                                  f"NOT ROW-ALIGNED — unpaired point diff only "
+                                  f"({fmt(eer_a_pt)} -> {fmt(eer_b_pt)})")
+                            rq2.append({
+                                "dataset": ds, "metric": f"eer_{metric}",
+                                "arm_a": arm_a, "arm_b": arm_b,
+                                "eer_a": round(eer_a_pt, 4),
+                                "eer_b": round(eer_b_pt, 4),
+                                "diff_b_minus_a": round(eer_b_pt - eer_a_pt, 4),
+                                "ci_lower": "", "ci_upper": "",
+                                "separates_from_zero": "",
+                                "n_writers": len(np.unique(A[3])), "n_pairs": len(A[1]),
+                                "caveat": "not row-aligned; unpaired",
+                            })
+        write_csv(os.path.join(args.out, "rq2_backbone_comparison.csv"), rq2)
 
     # ---------------- RQ3 -------------------------------------------
     print()
-    print("=" * 78)
-    print("RQ3 — combined vs institutional-only training (negative = combined BETTER)")
-    print("=" * 78)
-    rq3 = []
-    for ds in ["institutional", "cedar", "bhsig260_bengali", "bhsig260_hindi"]:
+    if "rq3" in args.skip:
+        print("=" * 78)
+        print("RQ3 — SKIPPED (--skip rq3): rq3_dataset_effect.csv left untouched")
+        print("=" * 78)
+        rq3 = None
+    else:
+      print("=" * 78)
+      print("RQ3 — combined vs institutional-only training (negative = combined BETTER)")
+      print("=" * 78)
+      rq3 = []
+      for ds in ["institutional", "cedar", "bhsig260_bengali", "bhsig260_hindi"]:
         A = get(("resnet18", ds, "test"))          # Arm A: institutional only
         B = get(("rq3_combined", ds, "test"))      # Arm B: combined
         if A is None or B is None:
@@ -348,11 +420,17 @@ def main():
                         "ci_upper": round(r["ci_upper"], 4),
                         "separates_from_zero": r["separates"],
                         "n_writers": r["n_writers"], "n_pairs": r["n_pairs"],
-                        "caveat": "shortcut-contaminated" if ds == "bhsig260_hindi" else ""})
-    write_csv(os.path.join(args.out, "rq3_dataset_effect.csv"), rq3)
+                        "caveat": "shortcut-contaminated" if ds == "bhsig260_hindi" else "",
+                        "in_training_mix": ds in mix})
+      write_csv(os.path.join(args.out, "rq3_dataset_effect.csv"), rq3)
 
     # ---------------- RQ4 -------------------------------------------
     print()
+    if "rq4" in args.skip:
+        print("=" * 78)
+        print("RQ4 — SKIPPED (--skip rq4): rq4_metrics.csv left untouched")
+        print("=" * 78)
+        return
     print("=" * 78)
     print("RQ4 — metric table. thr = threshold provenance for this corpus:")
     print("      own = tuned on this corpus's own validation split")
