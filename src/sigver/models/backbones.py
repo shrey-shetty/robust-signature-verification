@@ -205,6 +205,7 @@ def _load_torchvision(name: str, pretrained: bool, **kwargs):
         "resnet34": (tvm.resnet34, "ResNet34_Weights"),
         "efficientnet_b0": (tvm.efficientnet_b0, "EfficientNet_B0_Weights"),
         "vit_b_16": (tvm.vit_b_16, "ViT_B_16_Weights"),
+        "vit_b_32": (tvm.vit_b_32, "ViT_B_32_Weights"),
     }
     ctor, weights_enum_name = constructors[name]
 
@@ -287,6 +288,7 @@ BACKBONES: dict[str, Callable[..., nn.Module]] = {
     "resnet34": _build_resnet,
     "efficientnet_b0": _build_efficientnet,
     "vit_b_16": _build_vit,
+    "vit_b_32": _build_vit,
 }
 
 BACKBONE_NAMES = tuple(BACKBONES)
