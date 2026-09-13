@@ -104,6 +104,107 @@ def pair_summary(pairs: list[Pair]) -> dict[str, int]:
     return counts
 
 
+@dataclass(frozen=True)
+class Triplet:
+    a: int          # anchor index
+    p: int          # positive index (same writer, genuine)
+    n: int          # negative index (skilled forgery or other writer)
+    kind: str       # 'skilled' | 'random' -- which negative type was used
+
+
+def generate_triplets(samples: list[Sample],
+                      seed: int = 42,
+                      max_positive_per_writer: int | None = None) -> list[Triplet]:
+    """Build a balanced, deterministic triplet list for triplet-loss training.
+
+    Mirrors generate_pairs' anchor/positive construction and skilled/random
+    negative balance exactly, so the triplet and contrastive arms train on
+    equivalent data and differ only in loss function:
+      - anchor/positive come from the same combinations(gen, 2) construction,
+        shuffled with the same random.Random(seed) discipline and subject to
+        the same max_positive_per_writer cap
+      - one triplet is emitted per anchor-positive pair; per writer, half use
+        a skilled forgery of that writer as the negative and half use a
+        genuine signature from a different writer (n_skilled = n_neg // 2,
+        n_random = n_neg - n_skilled, matching generate_pairs)
+      - a writer with no forgeries gets all-random negatives, exactly as
+        generate_pairs does
+
+    Deliberately no hard/semi-hard negative mining: the existing (contrastive)
+    arm uses random sampling, so adding mining here would change a second
+    variable and break the single-variable (loss-only) comparison this arm
+    exists for. This is a scope decision, not an oversight.
+    """
+    rng = random.Random(seed)
+
+    genuine_by_writer: dict[int, list[int]] = defaultdict(list)
+    forgery_by_writer: dict[int, list[int]] = defaultdict(list)
+    for idx, s in enumerate(samples):
+        (forgery_by_writer if s.is_forgery else genuine_by_writer)[s.writer_id].append(idx)
+
+    writers = sorted(genuine_by_writer)
+    if len(writers) < 2:
+        raise ValueError("need at least 2 writers with genuine samples "
+                         "to form random negatives")
+
+    triplets: list[Triplet] = []
+
+    for w in writers:
+        gen = genuine_by_writer[w]
+        forg = forgery_by_writer.get(w, [])
+
+        # --- anchor/positive: genuine-genuine combinations ---
+        pos = list(combinations(gen, 2))
+        rng.shuffle(pos)
+        if max_positive_per_writer is not None:
+            pos = pos[:max_positive_per_writer]
+
+        n_neg = len(pos)
+        n_skilled = n_neg // 2 if forg else 0
+
+        others = [ow for ow in writers if ow != w]
+        for idx, (a, p) in enumerate(pos):
+            if idx < n_skilled:
+                triplets.append(Triplet(a, p, rng.choice(forg), "skilled"))
+            else:
+                ow = rng.choice(others)
+                triplets.append(Triplet(a, p, rng.choice(genuine_by_writer[ow]), "random"))
+
+    rng.shuffle(triplets)
+    return triplets
+
+
+def triplet_summary(triplets: list[Triplet]) -> dict[str, int]:
+    counts = {"skilled": 0, "random": 0}
+    for t in triplets:
+        counts[t.kind] += 1
+    counts["total"] = len(triplets)
+    return counts
+
+
+class TripletDataset(Dataset):
+    """Yields (img_anchor, img_positive, img_negative) for triplet training.
+
+    No label is returned: the argument ordering (anchor, positive, negative)
+    encodes the same-writer / different-writer relationship that PairDataset
+    instead carries in a separate label tensor.
+    """
+
+    def __init__(self, base: SignatureDataset, triplets: list[Triplet]):
+        self.base = base
+        self.triplets = triplets
+
+    def __len__(self) -> int:
+        return len(self.triplets)
+
+    def __getitem__(self, idx: int):
+        t = self.triplets[idx]
+        img_a, _, _ = self.base[t.a]
+        img_p, _, _ = self.base[t.p]
+        img_n, _, _ = self.base[t.n]
+        return img_a, img_p, img_n
+
+
 class PairDataset(Dataset):
     """Yields (image_a, image_b, label) for contrastive training.
 

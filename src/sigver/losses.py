@@ -32,3 +32,36 @@ class ContrastiveLoss(nn.Module):
         loss_similar = label * d.pow(2)
         loss_dissimilar = (1.0 - label) * F.relu(self.margin - d).pow(2)
         return (loss_similar + loss_dissimilar).mean()
+
+
+class TripletLoss(nn.Module):
+    """Triplet loss (Schroff, Kalenichenko & Philbin, 2015; see also
+    Maergner et al.'s graph-edit-distance + triplet-network offline
+    signature work in the reading list, which motivates this arm):
+
+        L = max(0, d(anchor, positive) - d(anchor, negative) + margin)
+
+    Triplets carry no explicit label: the ordering of the three inputs
+    (anchor, positive, negative) encodes the same-writer / different-
+    writer relationship that ContrastiveLoss instead reads from a
+    separate label tensor. Uses F.pairwise_distance, the same distance
+    definition as ContrastiveLoss, so the two losses are comparable.
+
+    margin defaults to 1.0 to match the contrastive arm for a clean
+    single-variable (loss-only) comparison; the source paper's margin
+    value could not be verified from the PDF, so this is a comparability
+    choice, not a paper-derived one.
+    """
+
+    def __init__(self, margin: float = 1.0):
+        super().__init__()
+        self.margin = margin
+
+    def forward(self,
+                emb_a: torch.Tensor,
+                emb_p: torch.Tensor,
+                emb_n: torch.Tensor) -> torch.Tensor:
+        """emb_a, emb_p, emb_n: (B, D) anchor/positive/negative embeddings."""
+        d_ap = F.pairwise_distance(emb_a, emb_p)
+        d_an = F.pairwise_distance(emb_a, emb_n)
+        return F.relu(d_ap - d_an + self.margin).mean()

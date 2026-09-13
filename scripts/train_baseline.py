@@ -1,9 +1,16 @@
-"""Train the baseline Siamese network with contrastive loss.
+"""Train the baseline Siamese network with contrastive or triplet loss.
 
-Writer-independent protocol: train pairs come only from train-split
-writers; validation pairs only from val-split writers. The checkpoint
-with the best validation EER is kept. The test split is NOT touched
-here — final test evaluation is a separate, deliberate step.
+Writer-independent protocol: train pairs/triplets come only from
+train-split writers; validation pairs only from val-split writers. The
+checkpoint with the best validation EER is kept. The test split is NOT
+touched here — final test evaluation is a separate, deliberate step.
+
+--loss {contrastive,triplet} (default: contrastive) selects the training
+objective. Validation always uses labelled pairs (PairDataset +
+generate_pairs) regardless of --loss, so val_eer_all/val_eer_skilled/
+val_auc/val_threshold stay directly comparable across every arm — only
+--loss triplet swaps the TRAIN dataset to TripletDataset + generate_triplets
+and the criterion to TripletLoss.
 
 Training-time augmentation: MorphAugment (random stroke erode/dilate)
 is applied to TRAIN samples only, to decorrelate global stroke width
@@ -63,12 +70,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from sigver.data.datasets import (  # noqa: E402
     list_samples_multi, writer_counts_by_dataset, SignatureDataset,
 )
-from sigver.data.pairs import generate_pairs, pair_summary, PairDataset  # noqa: E402
+from sigver.data.pairs import (  # noqa: E402
+    generate_pairs, pair_summary, PairDataset,
+    generate_triplets, triplet_summary, TripletDataset,
+)
 from sigver.data.augmentation import MorphAugment  # noqa: E402
 from sigver.models.siamese import SiameseNetwork  # noqa: E402
 from sigver.models.backbones import build_backbone, BACKBONE_NAMES  # noqa: E402
 from sigver.data.preprocessing import PREPROCESSING_VERSION  # noqa: E402
-from sigver.losses import ContrastiveLoss  # noqa: E402
+from sigver.losses import ContrastiveLoss, TripletLoss  # noqa: E402
 from sigver.evaluation.metrics import compute_eer, roc_auc  # noqa: E402
 
 
@@ -141,6 +151,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--margin", type=float, default=1.0)
+    ap.add_argument("--loss", default="contrastive", choices=["contrastive", "triplet"],
+                    help="training loss (default: contrastive, the PR2 baseline). "
+                         "Validation always uses labelled pairs regardless of this "
+                         "flag, so val_eer_all/val_eer_skilled/val_auc stay directly "
+                         "comparable across losses.")
     ap.add_argument("--embedding-dim", type=int, default=128)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--cache", action=argparse.BooleanOptionalAction, default=True,
@@ -223,20 +238,30 @@ def main() -> int:
     print(f"[data] val writers by dataset:   {val_writer_counts}")
 
     print(f"[data] max_positive_per_writer: {args.max_positive_per_writer}")
-    train_pairs = generate_pairs(train_samples, seed=args.seed,
-                                 max_positive_per_writer=args.max_positive_per_writer)
     val_pairs = generate_pairs(val_samples, seed=args.seed + 1,
                                max_positive_per_writer=args.max_positive_per_writer)
-    print(f"[data] train pairs: {pair_summary(train_pairs)}")
     print(f"[data] val pairs:   {pair_summary(val_pairs)}")
 
     # train gets stroke-width augmentation; val stays deterministic
     augment = None if args.no_augment else MorphAugment(seed=args.seed)
     print(f"[data] augmentation: {augment}")
 
-    train_ds = PairDataset(SignatureDataset(train_samples, cache_in_memory=args.cache,
-                                            transform=augment),
-                           train_pairs)
+    train_base = SignatureDataset(train_samples, cache_in_memory=args.cache,
+                                  transform=augment)
+    if args.loss == "triplet":
+        train_triplets = generate_triplets(train_samples, seed=args.seed,
+                                          max_positive_per_writer=args.max_positive_per_writer)
+        print(f"[data] train triplets: {triplet_summary(train_triplets)}")
+        train_ds = TripletDataset(train_base, train_triplets)
+    else:
+        train_pairs = generate_pairs(train_samples, seed=args.seed,
+                                     max_positive_per_writer=args.max_positive_per_writer)
+        print(f"[data] train pairs: {pair_summary(train_pairs)}")
+        train_ds = PairDataset(train_base, train_pairs)
+
+    # validation always stays on labelled pairs (regardless of --loss) so
+    # val_eer_all/val_eer_skilled/val_auc/val_threshold remain directly
+    # comparable across every arm, contrastive or triplet
     val_ds = PairDataset(SignatureDataset(val_samples, cache_in_memory=args.cache),
                          val_pairs)
     print(f"[data] ready in {time.time() - t0:.1f}s")
@@ -253,7 +278,8 @@ def main() -> int:
                               l2_normalize=args.l2_normalize,
                               input_norm=args.input_norm)
     model = SiameseNetwork(backbone=backbone).to(device)
-    criterion = ContrastiveLoss(margin=args.margin)
+    criterion = TripletLoss(margin=args.margin) if args.loss == "triplet" \
+        else ContrastiveLoss(margin=args.margin)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
     print(f"[model] device={device}, params="
@@ -296,11 +322,16 @@ def main() -> int:
         model.train()
         epoch_loss, n_batches = 0.0, 0
         t_epoch = time.time()
-        for a, b, y in train_loader:
-            a, b, y = a.to(device), b.to(device), y.to(device)
+        for batch in train_loader:
             optimizer.zero_grad()
-            ea, eb = model(a, b)
-            loss = criterion(ea, eb, y)
+            if args.loss == "triplet":
+                x_a, x_p, x_n = (t.to(device) for t in batch)
+                e_a, e_p, e_n = model.embed(x_a), model.embed(x_p), model.embed(x_n)
+                loss = criterion(e_a, e_p, e_n)
+            else:
+                a, b, y = (t.to(device) for t in batch)
+                ea, eb = model(a, b)
+                loss = criterion(ea, eb, y)
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
