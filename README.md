@@ -77,6 +77,32 @@ See `kaggle_bootstrap.md` for the exact Kaggle-safe install sequence.
   reusing local state — a local fix must be committed and pushed before it
   takes effect on Kaggle; a local edit alone is not visible there.
 
+## Kaggle Experiment Notebooks
+
+The following Kaggle notebooks were used during the project's experiment and
+evaluation workflow. They are linked here for reference and are not copied
+into this repository.
+
+| Experiment | Kaggle notebook |
+|---|---|
+| Institutional LR=1e-4 experiment | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/kaggle-institutional-lr1e4-experiment) |
+| Institutional full training | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/kaggle-institutional-full-training) |
+| ViT-B/32 recovery evaluation | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/vit-b-32-recovery-eval) |
+| Triplet-loss run | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/kaggle-triplet-run) |
+| RQ2 cells | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/kaggle-rq2-cells) |
+| SmallCNN institutional evaluation | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/smallcnn-institutional-eval) |
+| Results analysis / ROC | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/results-analysis-roc) |
+| RQ3 combined datasets | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/rq3-combined-datasets) |
+| RQ2 ResNet-18 evaluation | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/rq2-resnet18-eval) |
+| Cross-dataset skilled-threshold evaluation | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/cross-dataset-skilled-threshold) |
+| Weight-decay experiment | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/signature-verification-weight-decay) |
+| Retraining | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/retraining) |
+| Cross-evaluation | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/cross-eval) |
+| RQ2 ResNet-18 | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/rq2-resnet18) |
+| RQ2 cross-dataset evaluation | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/rq2-eval-crossdataset) |
+| RQ2 ResNet-34 | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/rq2-resnet34) |
+| ViT-B/32 1-epoch experiment | [Kaggle notebook](https://www.kaggle.com/code/shreyshettycoder/kaggle-vit-1epoch) |
+
 ### A known reproducibility trap: arm naming collision
 
 Several table-generation scripts (`scripts/final_results_tables.py`,
