@@ -189,8 +189,7 @@ loss variants.
 Datasets are not included in this repository (`data/raw/` is gitignored).
 GPDS Synthetic 4000 is licensed via a signed ULPGC agreement; the
 institutional dataset is private, supplied by the project supervisor, and is
-not publicly redistributable. See `.claude/rules/data-conventions.md` for
-dataset sizes, per-writer genuine/forgery counts, and provenance notes
+not publicly redistributable
 (including that the institutional dataset is confirmed to be based on GPDS
 Synthetic with additional data layered on top, and why their splits are
 deliberately mirrored to prevent leakage).
